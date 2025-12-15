@@ -1,0 +1,5 @@
+```
+__pycache__/
+*.pyc
+temp_face.jpg
+app_log.txt
