@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 temp_face.jpg
 app_log.txt
+*.mp4
+generation_request_*.txt
