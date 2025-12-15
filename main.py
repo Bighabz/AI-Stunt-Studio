@@ -1,6 +1,6 @@
 """
-AI Stunt Studio - CSE Python Final Project
-Author: Habib
+AI Stunt Studio - Python Final Project
+Author: Habib Jahshan
 """
 
 import tkinter as tk
@@ -10,6 +10,8 @@ import requests
 from io import BytesIO
 import datetime
 import os
+import time
+import threading
 
 
 def log_event(event_type, **kwargs):
@@ -24,10 +26,7 @@ def log_event(event_type, **kwargs):
 
 
 def save_generation_request(prompt, image_path, api_key=None, **kwargs):
-    """
-    Saves the generation request to a file.
-    In a real app, this would call the Veo 3 API.
-    """
+    """Saves the generation request to a file for demo mode"""
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"generation_request_{timestamp}.txt"
     
@@ -47,44 +46,60 @@ def save_generation_request(prompt, image_path, api_key=None, **kwargs):
     return filename
 
 
-def generate_image_with_veo(prompt, image_path, api_key=None, **kwargs):
+def generate_video_with_veo(prompt, image_path, api_key, status_callback=None):
     """
-    Calls Veo 3 API to generate video.
-    Currently saves request to file - replace with real API call when ready.
+    Actually calls the Veo 3 API to generate a video.
+    Returns (success, message, video_path)
     """
-    log_event("Veo_Request", prompt=prompt[:50], image=image_path, has_key=bool(api_key))
-    
-    # Save the request to a file (this always works)
-    saved_file = save_generation_request(prompt, image_path, api_key)
-    
-    if not api_key:
-        return f"DEMO MODE: Request saved to {saved_file}\n\nTo actually generate videos, enter your Gemini API key."
-    
-    # ============================================
-    # REAL VEO 3 API CALL WOULD GO HERE
-    # ============================================
-    # Uncomment and modify this when you have a working API key:
-    #
-    # try:
-    #     import google.generativeai as genai
-    #     genai.configure(api_key=api_key)
-    #     
-    #     # Upload the image
-    #     image_file = genai.upload_file(path=image_path)
-    #     
-    #     # Generate with Veo 3
-    #     model = genai.GenerativeModel('veo-3')
-    #     response = model.generate_content([prompt, image_file])
-    #     
-    #     # Save the result
-    #     # ... handle video output ...
-    #     
-    #     return "Video generated successfully!"
-    # except Exception as e:
-    #     return f"API Error: {str(e)}"
-    # ============================================
-    
-    return f"Request saved to {saved_file}\n\nAPI key received! In a full version, this would generate a video."
+    try:
+        # Import the Google GenAI library
+        from google import genai
+        from google.genai import types
+        
+        if status_callback:
+            status_callback("🔄 Connecting to Veo 3 API...")
+        
+        # Create client with API key
+        client = genai.Client(api_key=api_key)
+        
+        if status_callback:
+            status_callback("🎬 Generating video (this may take 1-2 minutes)...")
+        
+        # Start video generation
+        operation = client.models.generate_videos(
+            model="veo-3.0-generate-preview",
+            prompt=prompt,
+            config=types.GenerateVideosConfig(
+                aspect_ratio="16:9",
+            ),
+        )
+        
+        # Wait for generation to complete
+        while not operation.done:
+            time.sleep(10)
+            operation = client.operations.get(operation)
+            if status_callback:
+                status_callback("⏳ Still generating...")
+        
+        # Get the generated video
+        generated_video = operation.result.generated_videos[0]
+        
+        # Download and save
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_filename = f"stunt_video_{timestamp}.mp4"
+        
+        client.files.download(file=generated_video.video)
+        generated_video.video.save(video_filename)
+        
+        log_event("Video_Generated", filename=video_filename)
+        return (True, f"Video saved as: {video_filename}", video_filename)
+        
+    except ImportError:
+        return (False, "Missing library! Run: pip install google-genai", None)
+    except Exception as e:
+        error_msg = str(e)
+        log_event("API_Error", error=error_msg)
+        return (False, f"API Error: {error_msg}", None)
 
 
 class AIStuntStudio:
@@ -96,6 +111,7 @@ class AIStuntStudio:
         
         self.current_image = None
         self.selected_image_path = None
+        self.is_generating = False
         
         self.setup_ui()
         self.fetch_random_face()
@@ -173,6 +189,17 @@ class AIStuntStudio:
         )
         self.show_key_btn.pack(anchor="w")
         
+        # Get API key link
+        api_link = tk.Label(
+            api_frame,
+            text="Get a free API key at: aistudio.google.com/apikey",
+            font=("Helvetica", 8),
+            bg="#1a1a2e",
+            fg="#4ecdc4",
+            cursor="hand2"
+        )
+        api_link.pack(anchor="w")
+        
         # ============================================
         # IMAGE DISPLAY SECTION
         # ============================================
@@ -207,11 +234,11 @@ class AIStuntStudio:
         )
         self.image_label.pack()
         
-        # Single button frame
+        # Button frame
         btn_frame = tk.Frame(image_section, bg="#1a1a2e")
         btn_frame.pack(pady=10)
         
-        # SKIP BUTTON (combines pass and gets next)
+        # SKIP BUTTON
         self.skip_btn = tk.Button(
             btn_frame, 
             text="🔄 Skip to Next Face", 
@@ -314,6 +341,11 @@ class AIStuntStudio:
         )
         self.status_label.pack()
     
+    def update_status(self, text, color="#4ecdc4"):
+        """Update status label (thread-safe)"""
+        self.status_label.config(text=text, fg=color)
+        self.root.update()
+    
     def toggle_key_visibility(self):
         """Shows or hides the API key"""
         if self.show_key_var.get():
@@ -326,10 +358,12 @@ class AIStuntStudio:
         return self.api_key_entry.get().strip()
     
     def fetch_random_face(self):
-        """Fetches a random AI-generated face and auto-selects it"""
+        """Fetches a random AI-generated face"""
+        if self.is_generating:
+            return
+            
         try:
-            self.status_label.config(text="⏳ Fetching new face...", fg="#feca57")
-            self.root.update()
+            self.update_status("⏳ Fetching new face...", "#feca57")
             
             url = "https://thispersondoesnotexist.com"
             response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
@@ -338,21 +372,23 @@ class AIStuntStudio:
             img = img.resize((350, 350))
             img.save("temp_face.jpg")
             
-            # Auto-select this face
             self.selected_image_path = "temp_face.jpg"
             
             self.current_image = ImageTk.PhotoImage(img)
             self.image_label.config(image=self.current_image, text="", width=350, height=350)
             
             log_event("Face_Fetched", source="thispersondoesnotexist.com")
-            self.status_label.config(text="✓ Face loaded and selected!", fg="#4ecdc4")
+            self.update_status("✓ Face loaded and selected!", "#4ecdc4")
             
         except Exception as e:
-            self.status_label.config(text=f"✗ Error: {str(e)[:30]}", fg="#ff6b6b")
+            self.update_status(f"✗ Error: {str(e)[:30]}", "#ff6b6b")
             log_event("Error", message=str(e))
     
     def on_upload(self):
         """Upload own photo"""
+        if self.is_generating:
+            return
+            
         path = filedialog.askopenfilename(
             title="Select an image",
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif")]
@@ -363,10 +399,14 @@ class AIStuntStudio:
             self.current_image = ImageTk.PhotoImage(img)
             self.image_label.config(image=self.current_image, width=350, height=350)
             log_event("User_Upload", path=path)
-            self.status_label.config(text="✓ Your photo loaded and selected!", fg="#4ecdc4")
+            self.update_status("✓ Your photo loaded and selected!", "#4ecdc4")
     
     def on_generate(self):
         """Generate with Veo 3"""
+        if self.is_generating:
+            messagebox.showinfo("Please Wait", "A video is already being generated!")
+            return
+            
         prompt = self.prompt_entry.get("1.0", tk.END).strip()
         api_key = self.get_api_key()
         
@@ -378,17 +418,61 @@ class AIStuntStudio:
             messagebox.showwarning("No Image", "Please wait for a face to load or upload one!")
             return
         
-        self.status_label.config(text="⏳ Generating...", fg="#feca57")
-        self.root.update()
+        # ============================================
+        # DEMO MODE (no API key)
+        # ============================================
+        if not api_key:
+            self.update_status("📝 Demo mode - saving request...", "#feca57")
+            saved_file = save_generation_request(prompt, self.selected_image_path)
+            self.update_status("✓ Demo complete! Check your folder.", "#4ecdc4")
+            messagebox.showinfo(
+                "Demo Mode", 
+                f"Request saved to: {saved_file}\n\n"
+                "To actually generate videos, enter your Gemini API key.\n\n"
+                "Get one at: aistudio.google.com/apikey"
+            )
+            try:
+                os.startfile(os.getcwd())
+            except:
+                pass
+            return
         
-        result = generate_image_with_veo(prompt, self.selected_image_path, api_key=api_key)
+        # ============================================
+        # REAL API MODE (has API key)
+        # ============================================
+        self.is_generating = True
+        self.generate_btn.config(state="disabled", text="⏳ Generating...")
+        self.update_status("🎬 Starting Veo 3 generation...", "#feca57")
         
-        self.status_label.config(text="✓ Generation complete! Check your folder.", fg="#4ecdc4")
-        messagebox.showinfo("Generation Complete", result)
-        log_event("Generation_Complete", prompt=prompt[:30])
+        # Run in thread so UI doesn't freeze
+        def generate_thread():
+            success, message, video_path = generate_video_with_veo(
+                prompt, 
+                self.selected_image_path, 
+                api_key,
+                status_callback=lambda s: self.root.after(0, lambda: self.update_status(s, "#feca57"))
+            )
+            
+            # Update UI on main thread
+            def finish():
+                self.is_generating = False
+                self.generate_btn.config(state="normal", text="🎥 Generate Stunt Video")
+                
+                if success:
+                    self.update_status("✓ Video generated!", "#4ecdc4")
+                    messagebox.showinfo("Success!", message)
+                    try:
+                        os.startfile(os.getcwd())
+                    except:
+                        pass
+                else:
+                    self.update_status("✗ Generation failed", "#ff6b6b")
+                    messagebox.showerror("Error", message)
+            
+            self.root.after(0, finish)
         
-        # Open the folder so user can see the saved file
-        os.startfile(os.getcwd()) if os.name == 'nt' else None
+        thread = threading.Thread(target=generate_thread, daemon=True)
+        thread.start()
 
 
 if __name__ == "__main__":
