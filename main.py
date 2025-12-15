@@ -64,7 +64,7 @@ def generate_video_with_veo(prompt, image_path, api_key, status_callback=None):
             status_callback("Generating video (1-2 minutes)...")
         
         operation = client.models.generate_videos(
-            model="veo-3.0-generate-preview",
+            model="veo-3.1-generate-preview",
             prompt=prompt,
             config=types.GenerateVideosConfig(
                 aspect_ratio="16:9",
